@@ -1,6 +1,8 @@
-大模型lora微调学习02
+大模型lora微调学习03，开始训练
 
 一次性训练一个数据集，不要混合跑。在激活Python虚拟环境后开始。
+
+如果有非思考模式，则优先使用： template: qwen3_nothink
 
 # 编写命令文件
 
@@ -339,7 +341,7 @@ kill <PID>
 
 注意：如果是 nvidia 显卡还要查找显卡是否释放了，没有的话需要手动处理。
 
-## 手动恢复训练
+### 手动恢复训练
 
 * LLaMA-Factory 会存 checkpoint。重跑时把对应 yaml 里的 `overwrite_output_dir: true` 改为 `false`，并设置 `resume_from_checkpoint: 上次checkpoint路径`，可从断点继续。
 
@@ -349,3 +351,40 @@ kill <PID>
 
 * 在配置的输出目录中，trainer_log.jsonl 是之前训练的进度日志
 * checkpoint-xxx，是第x step保存的训练数据
+
+chckpoint 中的文件说明：
+
+```textplan
+checkpoint-100/                          共 11 个文件，约 70MB（text2sql）
+│
+│  === 第一组：核心，推理/合并/部署都依赖，永远别删 ===
+├── adapter_model.safetensors   20MB     [核心] LoRA 权重本体，学到的全部"知识"就在这一个文件里；
+│                                        删了等于没训练，无法恢复（除非重训）
+├── adapter_config.json         1.1KB    [核心] r=8、alpha=32、target_modules、基座路径；
+│                                        框架靠它知道把权重接到基座的哪些层上，删了权重加载失败
+│
+│  === 第二组：推理需要，做对比/合并时要带上 ===
+├── chat_template.jinja         4.1KB    [推理需要] qwen3_nothink 的对话模板，规定消息怎么拼接；
+│                                        删了推理时格式可能错乱；若你用脚本里 apply_chat_template 则不必单独带
+├── tokenizer.json              11MB     [推理需要] 分词器词表，文本转 token id；删了无法编码输入
+├── tokenizer_config.json       720B     [推理需要] 分词器配置（特殊token、padding）；删了分词器可能报错
+│
+│  === 第三组：仅"从断点续训"时需要，不续训就删 ===
+├── trainer_state.json          4.6KB    [可删·除非续训] 训练状态：停在哪步、epoch、完整 loss 历史；
+│                                        我查进度读的就是它；不续训可删，但建议留着做实验记录
+├── training_args.bin           5.4KB    [可删·除非续训] 训练超参的二进制序列化，续训时还原当时配置
+├── optimizer.pt                39MB     [可删·除非续训] AdamW 优化器状态（动量等），占整个 checkpoint 一半以上；
+│                                        不打算续训就删它，立刻省 39MB
+├── scheduler.pt                1.1KB    [可删·除非续训] 学习率调度器状态，续训时接着算 lr
+└── rng_state.pth               14KB     [可删·除非续训] 随机数状态，续训时保证数据打乱顺序接得上
+
+│
+│  === 无关紧要，可随手删 ===
+└── README.md                   5.2KB    [可删] 自动生成的模型卡片模板，内容几乎全是 [More Information Needed] 占位符，无任何实际作用
+
+【删除决策速查】
+- 只想拿去推理/合并：保留前 5 个（约 31MB），删掉第三组 + README，省 39MB
+- 想从断点接着训：11 个全部保留，一个都不能删
+- 已合并成完整模型、LoRA 也不用留：整个 checkpoint 目录可删（但先确认 outputs/merged_* 已生成）
+
+```
