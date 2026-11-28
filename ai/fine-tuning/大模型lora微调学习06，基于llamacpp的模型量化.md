@@ -599,3 +599,55 @@ curl -sS http://127.0.0.1:8080/v1/chat/completions \
 > 本文通过 `sys.path.insert(0, 'llamacpp/gguf-py')` 直接使用本地源码
 
 - **为什么不要直接 `pip install -r requirements-convert_hf_to_gguf.txt`**：它会按 pin 覆盖当前 venv——Python 3.13 (<3.15) 会把 torch 从 `2.15.0+cpu` 降到 `2.11.0`（触发大体积 wheel 下载），把 transformers 从 `5.24.1` 降到 `4.57.6`，把 protobuf 从 `7.36.2` 降到 `<5`；还会额外 pip 安装 `gguf`，与本地 `gguf-py` 源码路径产生重复来源。**本文实际做法**：未降级、未补装任何包，遇到缺失的手动补上。
+
+## 更多量化与推荐部署
+
+llamacpp以个人设备和小型公司为主，企业通常还有其它部署推理等软件，这是大模型推理方案与量化格式综合对比表：
+
+| 场景 / 方案                                   | 推荐 / 典型引擎                                     | 量化格式 / 有效位宽        | 相对 FP16 质量 / 性能表现                                             | 硬件 / 备注                                                   |
+| --------------------------------------------- | --------------------------------------------------- | -------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------- |
+| **个人/单机/离线/CPU/Mac/边缘**​              | llama.cpp + GGUF Q4_K_M                             | GGUF Q4_K_M (~4.5bit 混合) | 很好 (任务指标通常 -1~2%)<br>CPU单机: 5-15 tok/s (可用)               | CPU / Apple / 消费级 GPU / 边缘<br>CPU友好，llama.cpp唯一选择 |
+| **单机少量用户/快速原型/LoRA动态加载**​       | llama.cpp / llama-server                            | GGUF Q4_K_M 等             | -                                                                     | CPU / Apple / 消费级 GPU / 边缘                               |
+| **Apple Silicon / 边缘**​                     | llama.cpp + GGUF                                    | -                          | 主流方案                                                              | 不适用 vLLM                                                   |
+| **公司内部几十人用的 API**​                   | llama-server 往往够用<br>有GPU且并发上来再考虑 vLLM | -                          | -                                                                     | 有 GPU 考虑 vLLM                                              |
+| **公有云/多租户/高并发/OpenAI兼容API**​       | vLLM / SGLang                                       | AWQ / GPTQ / FP8           | AWQ: 好 (-1~3%)<br>GPTQ: 中-好 (-2~5%)<br>FP8: 近无损 (<1%)           | NVIDIA GPU<br>企业选AWQ/GPTQ主要为配合vLLM高吞吐内核          |
+| **固定模型/追求极致延迟吞吐/NVIDIA生产环境**​ | TensorRT-LLM                                        | INT4 AWQ/GPTQ、INT8、FP8   | 极致性能                                                              | NVIDIA GPU (需编译 engine)                                    |
+| **Intel CPU 企业推理**​                       | ONNX Runtime / OpenVINO                             | INT8 / INT4                | -                                                                     | Intel CPU / GPU                                               |
+| **单张 4090, 7B 4bit, 单请求**​               | llama.cpp vs vLLM                                   | -                          | llama.cpp: 80-120 tok/s<br>vLLM: 90-140 tok/s<br>(约 1x，差距很小)    | -                                                             |
+| **单张 A100, 7B 4bit, 32并发**​               | llama.cpp vs vLLM                                   | -                          | llama.cpp: 几百 tok/s 总吞吐<br>vLLM: 2000-4000 tok/s<br>(5-10x 差距) | -                                                             |
+| **70B 4bit, 多卡, 高并发**​                   | llama.cpp vs vLLM                                   | -                          | llama.cpp: 不擅长<br>vLLM: 擅长<br>(10x+ 差距)                        | -                                                             |
+| **0.6B, CPU**​                                | llama.cpp vs vLLM                                   | -                          | llama.cpp: 20-50 tok/s<br>vLLM: 不适用                                | -                                                             |
+| **0.6B, 单GPU, 高并发**​                      | llama.cpp vs vLLM                                   | -                          | llama.cpp: 中等<br>vLLM: 高<br>(3-10x 差距，绝对延迟都很低)           | -                                                             |
+
+**核心选型结论补充：**
+
+1. **质量与量化**：同一档位下，质量差距远小于速度差距。“企业级量化更准”不成立，AWQ/GPTQ 4bit 与 GGUF Q4_K_M 基本同一水平；FP8 更准但需要新 GPU（如 H100/Ada）。
+2. **性能对比**：必须分场景看，不能拿“CPU上的llama.cpp”对比“GPU上的vLLM”（这是硬件差异）。在低并发或CPU/边缘场景 llama.cpp 是主力；在高并发/GPU场景 vLLM 吞吐量呈倍数级领先。
+3. **企业级方案**：企业最常听到的“更快”，通常指 `AWQ/GPTQ + vLLM` 或 `FP8 + TensorRT-LLM`。
+
+### 其它工具使用模型是否兼容
+
+LLaMA-Factory 输出的可以，vLLM 直接就能用，**不需要转换**。LLaMA-Factory 输出的是标准 PEFT LoRA（`adapter_config.json` 与 `adapter_model.safetensors`），不是私有格式；只有 llama.cpp、Ollama 这类 GGUF 生态需要先转 GGUF。
+
+#### 输出的lora内容兼容性
+
+| 配置项                     | 值                                        | vLLM 兼容性 | 说明                                      |
+| -------------------------- | ----------------------------------------- | :---------: | ----------------------------------------- |
+| `peft_type`                | LORA                                      |      ✅      | 标准 PEFT LoRA 类型                       |
+| `r` 与 `lora_alpha`        | 8 与 32                                   |      ✅      | vLLM 默认 `max-lora-rank=16`，8 在范围内  |
+| `target_modules`           | q、k、v、o、gate、up、down 共 7 个线性层  |      ✅      | 全部是 vLLM LoRA 支持的模块               |
+| `modules_to_save`          | `null`                                    |      ✅      | 未改动 embedding、lm_head，可直接动态加载 |
+| `use_dora` 与 `use_rslora` | false 与 false                            |      ✅      | 标准 LoRA（非 DoRA、非 RsLoRA）           |
+| `base_model_name_or_path`  | `/mnt/d/opt/lora_learn/models/Qwen3-0.6B` |      ✅      | 不影响兼容性；部署时显式指定 base 即可    |
+
+#### 推理栈支持情况
+
+| 推理栈                         | 是否可直接加载 | 是否需要转换  |
+| ------------------------------ | :------------: | ------------- |
+| vLLM（PEFT LoRA）              |      ✅ 是      | 否            |
+| 其他支持 PEFT 的推理栈         |      ✅ 是      | 否            |
+| llama.cpp、Ollama（GGUF 生态） |   ⚠️ 需 GGUF   | 是，先转 GGUF |
+
+# 部署
+
+更多部署相关，可以查看 ../deployment_run/基于llama部署gguf文件.md 文件
